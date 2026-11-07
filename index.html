@@ -322,6 +322,15 @@
     }
     uhrEl.addEventListener('pointerup',endDrag);
     uhrEl.addEventListener('pointercancel',()=>{ dragging=false; uhrEl.classList.remove('dragging'); });
+
+    /* ---------- Klick auf die dunkle Flaeche AUSSERHALB des Ziffernblattes:
+       loest den "1-Uhr"-Glockenschlag (ein Schlag) aus — auch als
+       iOS-Test/Gesten-Entsperrung fuer den Sound. ---------- */
+    document.addEventListener('click',e=>{
+      if(uhrEl.contains(e.target)) return;   // Klick aufs Blatt = auf echte Zeit stellen
+      unlockAudio();
+      playChime(1);
+    });
   </script>
 </body>
 </html>
