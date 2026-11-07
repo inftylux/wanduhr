@@ -111,8 +111,8 @@
     let timeOffsetMs=0;       // manuell gestellter Versatz zur echten Uhrzeit
     function adjustedNow(){ return new Date(Date.now()+timeOffsetMs); }
 
-    // Anzahl Schläge zur angegebenen Stunde (24-h-Zählung; 0:00 -> 24 Schläge)
-    function strikeCountForHour(h){ return (h%24===0)?24:h; }
+    // Anzahl Schläge zur angegebenen Stunde (12-Std.-Zählung; 0/12/24 Uhr -> 12 Schläge)
+    function strikeCountForHour(h){ const n=h%12; return n===0?12:n; }
 
     const STRIKE_INTERVAL_S=1.5;  // Hauptschlag im Sekundentakt (1,5 s)
     const strikePool=[];          // mehrere Instanzen, damit der Nachhall ausklingt
@@ -182,7 +182,7 @@
     function loop(){
       const now=adjustedNow();
       setHands(now);
-      // Volle Stunde: korrekte Schlaganzahl (24-h-Zählung)
+      // Volle Stunde: korrekte Schlaganzahl (12-Std.-Zählung)
       const key=`${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}`;
       if(now.getMinutes()===0 && now.getSeconds()<=1 && key!==lastChimeKey){
         lastChimeKey=key;
@@ -250,7 +250,8 @@
       for(let b=Math.floor(lo/30)*30+30; b<hi; b+=30){
         if(((b%60)+60)%60===0){
           const hb=((Math.floor(b/60))%24+24)%24;
-          playChime(hb===0?24:hb);
+          const hn=hb%12;
+          playChime(hn===0?12:hn);
         }else{
           playHalf();
         }
