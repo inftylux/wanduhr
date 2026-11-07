@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<!-- iOS: fullscreen WebApp wie eine eigene App -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Wanduhr">
+<title>Wanduhr</title>
+<link rel="icon" type="image/png" href="werk/icon.png">
+<link rel="apple-touch-icon" href="werk/apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
+<style>
+  html,body{
+    height:100%;
+    margin:0;
+    background:#181410;            /* nur hinter den transparenten runden Ecken sichtbar */
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+    box-sizing:border-box;
+    /* iOS-Notch/Statusleiste (fullscreen-App) ausweichen */
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  /* Die Uhr IST die ganze Seite: echtes Zifferblatt-Foto, runde Ecken transparent */
+  .uhr{
+    position:relative;
+    width:min(92vmin,1000px);
+    cursor:grab;
+    touch-action:none;             /* Zeigerstellen mit Finger/Maus */
+    user-select:none;
+    -webkit-user-select:none;
+  }
+  .uhr.dragging{cursor:grabbing;}
+  .uhr img.dial{
+    width:100%;
+    display:block;
+    pointer-events:none;
+  }
+
+  /* Zeiger-Container: quadratisch, Zentrum = exaktes Drehzentrum des Blattes.
+     Ermittelt über die konzentrischen Ringe (Medaillon-Ringe r=202/217 und
+     Minutering r=391 stimmen dort auf <1 px überein):
+     Pivot im Foto: (508.4, 525.8) von 1060×1082  ->  (47.96 %, 48.59 %) */
+  .hands{
+    position:absolute;
+    left:47.96%;top:48.59%;
+    width:100%;
+    aspect-ratio:1;
+    transform:translate(-50%,-50%);
+    z-index:2;
+    pointer-events:none;
+  }
+  /* Zeiger drehen um die Nabe (echtes Naden-Zentrum der Fotos).
+     Drehpunkt = Zentrum des Kreises am Zeigerende:
+     – Stunde  (kleinerZeiger-crop.png, 249×912):  quadratisches Nabe-Loch,
+       Zentrum (110.8, 827.8) = (44.49 %, 90.77 %); Naben-Disc-Kreis
+       (r=81.9 px) konzentrisch, std 0.49 px -> bestätigt.
+     – Minute  (groesserZeiger-crop.png, 193×1299): gravierte konzentrische
+       Ringe um die Mutter, 7 unabhängige Kreisfits -> Zentrum
+       (97.4, 1196.0) = (50.47 %, 92.07 %).
+     Größe: Spitze des Minutenzeigers berührt den Minutering (r = 36.9 %);
+     Stundenzeiger proportional ebenfalls verkleinert. */
+  .hand-img{
+    position:absolute;
+    top:50%;left:50%;
+    transform:rotate(0deg);
+    display:block;
+  }
+  .hand-img.hour{
+    height:32.3%;width:auto;
+    margin-top:-29.33%;             /* Pivot (90.77 % d. Hoehe) auf Blattmitte */
+    margin-left:-3.92%;             /* Pivot (44.49 % d. Breite) auf Blattmitte */
+    transform-origin:44.49% 90.77%;
+  }
+  .hand-img.minute{
+    height:40.1%;width:auto;
+    margin-top:-36.89%;             /* Pivot (92.07 % d. Hoehe) auf Blattmitte */
+    margin-left:-3.01%;             /* Pivot (50.47 % d. Breite) auf Blattmitte */
+    transform-origin:50.47% 92.07%;
+  }
+</style>
+</head>
+<body>
+
+  <div class="uhr" id="uhr" role="region" aria-label="Wanduhr">
+    <img class="dial" src="werk/ziffernblatt-frei.png" alt="" draggable="false">
+    <div class="hands">
+      <img class="hand-img hour" src="werk/kleinerZeiger-crop.png" alt="Stundenzeiger" draggable="false">
+      <img class="hand-img minute" src="werk/groesserZeiger-crop.png" alt="Minutenzeiger" draggable="false">
+    </div>
+  </div>
+
+  <audio id="strike" src="schlag-lang.m4a" preload="auto"></audio>
+
+  <script>
+    const hourEl = document.querySelector('.hand-img.hour'),
+          minuteEl = document.querySelector('.hand-img.minute'),
+          uhrEl = document.getElementById('uhr'),
+          strike = document.getElementById('strike');
+
+    /* ---------------- Glockenschlag-Logik ---------------- */
+    let chimeBusy=false;
+    let lastChimeKey=null;    // volle Stunde
+    let lastHalfKey=null;     // halbe Stunde
+    let chainTimer=null;
+    let timeOffsetMs=0;       // manuell gestellter Versatz zur echten Uhrzeit
+    function adjustedNow(){ return new Date(Date.now()+timeOffsetMs); }
+
+    // Anzahl Schläge zur angegebenen Stunde (24-h-Zählung; 0:00 -> 24 Schläge)
+    function strikeCountForHour(h){ return (h%24===0)?24:h; }
+
+    const STRIKE_INTERVAL_S=1.3;  // Hauptschlag im Sekundentakt (1,3 s)
+    const strikePool=[];          // mehrere Instanzen, damit der Nachhall ausklingt
+    function buildPool(){
+      const dur=strike.duration||0;
+      if(!isFinite(dur)||dur<=0) return;
+      const n=Math.ceil((dur+0.2)/STRIKE_INTERVAL_S);
+      if(strikePool.length!==n){
+        strikePool.length=0;
+        strikePool.push(strike);
+        for(let i=1;i<n;i++){
+          const a=strike.cloneNode(); a.preload='auto'; strikePool.push(a);
+        }
+      }
+    }
+
+    function playChime(count){
+      if(chimeBusy) return;
+      chimeBusy=true;
+      buildPool();
+      if(strikePool.length===0) strikePool.push(strike);
+      const dur=(isFinite(strike.duration)&&strike.duration>0)?strike.duration:5.3;
+      let k=0;
+      const tick=()=>{
+        if(k>=count){
+          chainTimer=setTimeout(()=>{ chimeBusy=false; }, dur*1000+200);
+          return;
+        }
+        const a=strikePool[k%strikePool.length];
+        a.muted=false; a.currentTime=0;
+        a.play().catch(()=>{});
+        k++;
+        chainTimer=setTimeout(tick, STRIKE_INTERVAL_S*1000);
+      };
+      tick();
+    }
+    // Ein einzelner Schlag mit vollem Nachhall (halbe Stunde)
+    function playHalf(){
+      if(chimeBusy) return;
+      chimeBusy=true;
+      const dur=(isFinite(strike.duration)&&strike.duration>0)?strike.duration:5.3;
+      strike.muted=false; strike.currentTime=0;
+      strike.play().catch(()=>{});
+      chainTimer=setTimeout(()=>{ chimeBusy=false; }, dur*1000+200);
+    }
+    // Beim ersten Nutzer-Klick Audio ohne hörbaren Schlag entsperren (Browser-Policy).
+    document.body.addEventListener('click',()=>{
+      if(chimeBusy) return;
+      const unlock=a=>{
+        a.muted=true;
+        a.play().then(()=>{ a.pause(); a.currentTime=0; a.muted=false; })
+               .catch(()=>{ a.muted=false; });
+      };
+      strikePool.forEach(unlock);
+    },{once:true});
+
+    /* ---------------- Uhrwerk ---------------- */
+    function setHands(now){
+      const s=now.getSeconds()+now.getMilliseconds()/1000;
+      const m=now.getMinutes()+s/60;
+      const h=((now.getHours()%12)+m/60);
+      // Zeiger drehen um die Nabe (echtes Nabenloch); 0deg = 12 Uhr
+      minuteEl.style.transform=`rotate(${m*6}deg)`;
+      hourEl.style.transform=`rotate(${h*30}deg)`;
+    }
+
+    function loop(){
+      const now=adjustedNow();
+      setHands(now);
+      // Volle Stunde: korrekte Schlaganzahl (24-h-Zählung)
+      const key=`${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}`;
+      if(now.getMinutes()===0 && now.getSeconds()<=1 && key!==lastChimeKey){
+        lastChimeKey=key;
+        playChime(strikeCountForHour(now.getHours()));
+      }
+      // Halbe Stunde: ein einzelner Schlag mit Nachhall
+      const keyH=`${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-30`;
+      if(now.getMinutes()===30 && now.getSeconds()<=1 && keyH!==lastHalfKey){
+        lastHalfKey=keyH;
+        playHalf();
+      }
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    /* ---------- Zeiger mit der Maus stellen, Klick = auf echte Zeit ---------- */
+    /* ---------- Zeiger mit der Maus stellen, Klick = auf echte Zeit ---------- */
+    let dragging=false;
+    let dragAnchorT=0;   // ausgerichtete Ankerzeit (ms), Sekunde = 0
+    let dragMin0=0;      // Minuten (mit Stunden ×60) am Anker
+    let dragPrevMin=0;   // letzte Minutenposition (Grenzüberflug-Erkennung)
+    let dragLastRaw=0;   // letzter roher Winkel für die Winkeldifferenz
+    let dragCum=0;       // kumulativer Winkel (mehrere Umdrehungen)
+    let downT=0, downX=0, downY=0, moved=false;
+
+    function dialAngle(ev){
+      const r=uhrEl.getBoundingClientRect();
+      const cx=r.left+r.width/2, cy=r.top+r.height/2;
+      // 0° = oben (12 Uhr), im Uhrzeigersinn positiv
+      return Math.atan2(ev.clientX-cx, -(ev.clientY-cy))*180/Math.PI;
+    }
+
+    uhrEl.addEventListener('pointerdown',ev=>{
+      if(ev.button!==undefined && ev.button!==0) return;
+      dragging=true;
+      moved=false;
+      downT=Date.now(); downX=ev.clientX; downY=ev.clientY;
+      uhrEl.classList.add('dragging');
+      try{ uhrEl.setPointerCapture(ev.pointerId); }catch{}
+      const T=Date.now()+timeOffsetMs;
+      const T0=Math.floor(T/60000)*60000;   // Sekunde auf 0 ausrichten
+      timeOffsetMs=T0-Date.now();
+      dragAnchorT=T0;
+      const d0=new Date(T0);
+      dragMin0=d0.getHours()*60+d0.getMinutes();
+      dragPrevMin=dragMin0;
+      dragLastRaw=dialAngle(ev);
+      dragCum=0;
+      ev.preventDefault();
+    });
+    uhrEl.addEventListener('pointermove',ev=>{
+      if(!dragging) return;
+      const raw=dialAngle(ev);
+      let d=raw-dragLastRaw;
+      while(d>180)  d-=360;
+      while(d<-180) d+=360;
+      dragLastRaw=raw;
+      if(Math.abs(d)>0.05) moved=true;
+      dragCum+=d;
+      const m=dragMin0+dragCum/6;    // Minutenposition (mit Stunden×60)
+      const Tt=dragAnchorT+(m-dragMin0)*60000;
+      timeOffsetMs=Tt-Date.now();
+      // Überflogene :00 / :30-Grenzen lösen Glockenschläge aus
+      const lo=Math.min(dragPrevMin,m), hi=Math.max(dragPrevMin,m);
+      for(let b=Math.floor(lo/30)*30+30; b<hi; b+=30){
+        if(((b%60)+60)%60===0){
+          const hb=((Math.floor(b/60))%24+24)%24;
+          playChime(hb===0?24:hb);
+        }else{
+          playHalf();
+        }
+      }
+      dragPrevMin=m;
+      ev.preventDefault();
+    });
+    function endDrag(ev){
+      if(!dragging) return;
+      dragging=false;
+      uhrEl.classList.remove('dragging');
+      // Kurzer Klick ohne Drehen: Uhr auf echte Zeit zurückstellen
+      if(!moved){
+        const dt=Date.now()-downT;
+        const dist=Math.hypot((ev.clientX??downX)-downX,(ev.clientY??downY)-downY);
+        if(dt<600 && dist<10){
+          timeOffsetMs=0;
+        }
+      }
+    }
+    uhrEl.addEventListener('pointerup',endDrag);
+    uhrEl.addEventListener('pointercancel',()=>{ dragging=false; uhrEl.classList.remove('dragging'); });
+  </script>
+</body>
+</html>

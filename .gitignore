@@ -1,0 +1,16 @@
+# Nur die für das Deployment erforderlichen Dateien versionieren;
+# alles andere (Originals, Backups, Arbeitsdateien) ist ignoriert.
+
+/*
+!/.gitignore
+!/index.html
+!/manifest.json
+!/schlag-lang.m4a
+
+!/werk/
+/werk/*
+!/werk/ziffernblatt-frei.png
+!/werk/kleinerZeiger-crop.png
+!/werk/groesserZeiger-crop.png
+!/werk/icon.png
+!/werk/apple-touch-icon.png
