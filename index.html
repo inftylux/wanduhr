@@ -104,7 +104,6 @@
           strike = document.getElementById('strike');
 
     /* ---------------- Glockenschlag-Logik ---------------- */
-    let chimeBusy=false;
     let lastChimeKey=null;    // volle Stunde
     let lastHalfKey=null;     // halbe Stunde
     let chainTimer=null;
@@ -114,8 +113,87 @@
     // Anzahl Schläge zur angegebenen Stunde (12-Std.-Zählung; 0/12/24 Uhr -> 12 Schläge)
     function strikeCountForHour(h){ const n=h%12; return n===0?12:n; }
 
+    /* iOS-sicherer Sound über Web Audio: Der AudioContext muss nur EINMAL
+       innerhalb einer Nutzergeste erzeugt und fortgesetzt werden — danach
+       spielt er zuverlässig, auch wenn die Wiedergabe aus Timern heraus startet. */
     const STRIKE_INTERVAL_S=1.5;  // Hauptschlag im Sekundentakt (1,5 s)
-    const strikePool=[];          // mehrere Instanzen, damit der Nachhall ausklingt
+    let actx=null, strikeBuf=null, bufLoading=false, waudioReady=false;
+    let busyUntil=0;              // actx.currentTime-Level, solange Schläge laufen
+
+    function unlockAudio(){
+      try{
+        if(!actx){
+          const AC=window.AudioContext||window.webkitAudioContext;
+          if(!AC) return;                      // kein Web Audio -> Fallback unten
+          actx=new AC();
+          loadStrikeBuffer();
+        }
+        if(actx.state==='suspended'){
+          actx.resume().then(()=>{ waudioReady=true; }).catch(()=>{});
+        }else if(actx.state==='running'){
+          waudioReady=true;
+        }
+      }catch(e){}
+    }
+    async function loadStrikeBuffer(){
+      if(bufLoading) return; bufLoading=true;
+      try{
+        const resp=await fetch(strike.src);
+        const ab=await resp.arrayBuffer();
+        strikeBuf=await actx.decodeAudioData(ab);
+      }catch(e){ bufLoading=false; }           // Laden fehlgeschlagen -> Fallback
+    }
+    function scheduleChime(count){
+      if(!waudioReady||!strikeBuf||actx.state!=='running') return false;
+      const t0=actx.currentTime+0.03;
+      for(let k=0;k<count;k++){
+        const s=actx.createBufferSource();
+        s.buffer=strikeBuf;
+        s.connect(actx.destination);
+        s.start(t0+k*STRIKE_INTERVAL_S);
+      }
+      return t0+(count-1)*STRIKE_INTERVAL_S+strikeBuf.duration;
+    }
+    // Entsperrung auf JEDER Nutzergeste — auch Ziehen (pointerdown/up), nicht nur Klick:
+    ['touchstart','touchend','pointerdown','pointerup','click','keydown'].forEach(t=>{
+      document.addEventListener(t, unlockAudio, {capture:true, passive:true});
+    });
+
+    function playChime(count){
+      if(actx){
+        const endT=scheduleChime(count);
+        if(endT!==false){ busyUntil=Math.max(busyUntil,endT+0.2); return; }
+      }
+      if(chainTimer && Date.now()<chainBusyUntil) return;   // Fallback-Kette läuft
+      chainBusyUntil=Date.now()+1000*(((isFinite(strike.duration)&&strike.duration>0)?strike.duration:5.3)+count*STRIKE_INTERVAL_S+0.4);
+      buildPool();
+      if(strikePool.length===0) strikePool.push(strike);
+      let k=0;
+      const tick=()=>{
+        if(k>=count) return;
+        const a=strikePool[k%strikePool.length];
+        a.muted=false; a.currentTime=0;
+        a.play().catch(()=>{});
+        k++;
+        chainTimer=setTimeout(tick, STRIKE_INTERVAL_S*1000);
+      };
+      tick();
+    }
+    // Ein einzelner Schlag mit vollem Nachhall (halbe Stunde)
+    function playHalf(){
+      if(actx){
+        const endT=scheduleChime(1);
+        if(endT!==false){ busyUntil=Math.max(busyUntil,endT+0.2); return; }
+      }
+      if(chainTimer && Date.now()<chainBusyUntil) return;
+      chainBusyUntil=Date.now()+1000*(((isFinite(strike.duration)&&strike.duration>0)?strike.duration:5.3)+0.4);
+      strike.muted=false; strike.currentTime=0;
+      strike.play().catch(()=>{});
+    }
+    let chainBusyUntil=0;
+    /* Fallback: klassisches HTML-Audio mit Pool mehrere Instanzen, damit der
+       Nachhall ausklingt; Pool sofort (bei geladenen Metadaten) aufbauen. */
+    const strikePool=[];
     function buildPool(){
       const dur=strike.duration||0;
       if(!isFinite(dur)||dur<=0) return;
@@ -128,39 +206,9 @@
         }
       }
     }
-
-    function playChime(count){
-      if(chimeBusy) return;
-      chimeBusy=true;
-      buildPool();
-      if(strikePool.length===0) strikePool.push(strike);
-      const dur=(isFinite(strike.duration)&&strike.duration>0)?strike.duration:5.3;
-      let k=0;
-      const tick=()=>{
-        if(k>=count){
-          chainTimer=setTimeout(()=>{ chimeBusy=false; }, dur*1000+200);
-          return;
-        }
-        const a=strikePool[k%strikePool.length];
-        a.muted=false; a.currentTime=0;
-        a.play().catch(()=>{});
-        k++;
-        chainTimer=setTimeout(tick, STRIKE_INTERVAL_S*1000);
-      };
-      tick();
-    }
-    // Ein einzelner Schlag mit vollem Nachhall (halbe Stunde)
-    function playHalf(){
-      if(chimeBusy) return;
-      chimeBusy=true;
-      const dur=(isFinite(strike.duration)&&strike.duration>0)?strike.duration:5.3;
-      strike.muted=false; strike.currentTime=0;
-      strike.play().catch(()=>{});
-      chainTimer=setTimeout(()=>{ chimeBusy=false; }, dur*1000+200);
-    }
-    // Beim ersten Nutzer-Klick Audio ohne hörbaren Schlag entsperren (Browser-Policy).
+    strike.addEventListener('loadedmetadata', buildPool);
     document.body.addEventListener('click',()=>{
-      if(chimeBusy) return;
+      buildPool();
       const unlock=a=>{
         a.muted=true;
         a.play().then(()=>{ a.pause(); a.currentTime=0; a.muted=false; })
