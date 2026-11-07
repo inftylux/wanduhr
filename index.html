@@ -114,7 +114,7 @@
     // Anzahl Schläge zur angegebenen Stunde (24-h-Zählung; 0:00 -> 24 Schläge)
     function strikeCountForHour(h){ return (h%24===0)?24:h; }
 
-    const STRIKE_INTERVAL_S=1.3;  // Hauptschlag im Sekundentakt (1,3 s)
+    const STRIKE_INTERVAL_S=1.5;  // Hauptschlag im Sekundentakt (1,5 s)
     const strikePool=[];          // mehrere Instanzen, damit der Nachhall ausklingt
     function buildPool(){
       const dur=strike.duration||0;
